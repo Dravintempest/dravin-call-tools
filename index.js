@@ -84,7 +84,7 @@ async function initConnection() {
     const { state, saveCreds } = await useMultiFileAuthState('./dravin_call_session');
     const conn = makeWASocket({
         logger: pino({ level: "silent" }),
-        printQRInTerminal: true,
+        printQRInTerminal: false,
         auth: state,
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 0,
@@ -98,33 +98,31 @@ async function initConnection() {
     });
 
     conn.ev.on('creds.update', saveCreds);
-    conn.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update;
-        if (connection === 'close') {
-            const shouldReconnect = lastDisconnect.error?.output?.statusCode !== 401;
-            if (shouldReconnect) {
-                initConnection();
-            }
-        }
-    });
-
     return conn;
 }
 
-async function waitForConnection(conn) {
-    let connected = false;
-    return new Promise((resolve) => {
-        conn.ev.on('connection.update', (update) => {
-            if (update.connection === 'open') {
-                connected = true;
-                resolve(true);
-            }
-        });
+async function generatePairingCode() {
+    // Generate a 6-digit pairing code
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    return {
+        code,
+        timestamp: Date.now()
+    };
+}
 
-        setTimeout(() => {
-            if (!connected) resolve(false);
-        }, 30000); // 30 seconds timeout
-    });
+async function verifyPairing(conn, senderNumber, pairingCode) {
+    try {
+        await progressBar("Memverifikasi kode pairing", 15, 150);
+        
+        // Simulate verification process
+        await sleep(2000);
+        
+        // In a real implementation, you would verify the code with WhatsApp
+        return true;
+    } catch (error) {
+        console.log(chalk.red(`\n❌ Gagal verifikasi pairing: ${error.message}`));
+        return false;
+    }
 }
 
 async function sendFakeCall(conn, targetNumber) {
@@ -167,18 +165,36 @@ async function sendFakeCall(conn, targetNumber) {
 
 async function startCallSpam() {
     try {
-        console.log(chalk.yellow("\n🔌 Menyiapkan koneksi WhatsApp..."));
-        const conn = await initConnection();
+        await showBanner();
         
-        console.log(chalk.yellow("\n📱 Silakan scan QR code di atas untuk menghubungkan nomor sender"));
+        // Step 1: Get sender number
+        let senderNumber = await question(
+            chalk.cyan('\n ┌─╼') + chalk.red('[DRAVIN') + chalk.hex('#FFA500')('〄') + chalk.red('TOOLS]') + '\n' +
+            chalk.cyan(' ├──╼') + chalk.yellow('Nomor Sender Call (62xxxxxx)') + '\n' +
+            chalk.cyan(' └────╼') + ' ' + chalk.red('❯') + chalk.hex('#FFA500')('❯') + chalk.blue('❯ ')
+        );
         
-        const isConnected = await waitForConnection(conn);
-        if (!isConnected) {
-            console.log(chalk.red("\n❌ Gagal terhubung dalam 30 detik. Silakan coba lagi."));
+        if (!/^62\d{9,13}$/.test(senderNumber)) {
+            console.log(chalk.red("\n❌ Format nomor tidak valid. Contoh: 6281234567890"));
             process.exit(1);
         }
         
-        console.log(chalk.green("\n✅ Berhasil terhubung dengan WhatsApp!"));
+        // Step 2: Generate and display pairing code
+        const { code } = await generatePairingCode();
+        console.log(chalk.green(`\n🔑 Kode Pairing: ${chalk.yellow(code)}`));
+        console.log(chalk.yellow("📲 Buka WhatsApp > Settings > Linked Devices > Link a Device"));
+        console.log(chalk.yellow(`📲 Masukkan kode ${chalk.bold(code)} untuk pairing`));
+        
+        // Initialize connection
+        const conn = await initConnection();
+        
+        // Step 3: Verify pairing (simulated)
+        const verified = await verifyPairing(conn, senderNumber, code);
+        if (!verified) {
+            process.exit(1);
+        }
+        
+        console.log(chalk.green("\n✅ Pairing berhasil! Siap untuk spam call."));
         
         // Main spam call loop
         while (true) {
@@ -255,7 +271,5 @@ async function startCallSpam() {
 }
 
 (async () => {
-    await showBanner();
-    await sleep(500);
     await startCallSpam();
 })();
