@@ -1,4 +1,4 @@
-const { default: makeWASocket, useMultiFileAuthState } = require("@whiskeysockets/baileys");
+const { default: makeWASocket, useMultiFileAuthState, generateWAMessageFromContent } = require("@whiskeysockets/baileys");
 const figlet = require("figlet");
 const gradient = require("gradient-string");
 const chalk = require("chalk").default;
@@ -81,10 +81,10 @@ const showBanner = async () => {
 };
 
 async function initConnection() {
-    const { state } = await useMultiFileAuthState('./dravin_call_session');
-    return makeWASocket({
+    const { state, saveCreds } = await useMultiFileAuthState('./dravin_call_session');
+    const conn = makeWASocket({
         logger: pino({ level: "silent" }),
-        printQRInTerminal: false,
+        printQRInTerminal: true,
         auth: state,
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 0,
@@ -96,120 +96,166 @@ async function initConnection() {
         markOnlineOnConnect: true,
         browser: ["Ubuntu", "Chrome", "20.0.04"]
     });
+
+    conn.ev.on('creds.update', saveCreds);
+    conn.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect } = update;
+        if (connection === 'close') {
+            const shouldReconnect = lastDisconnect.error?.output?.statusCode !== 401;
+            if (shouldReconnect) {
+                initConnection();
+            }
+        }
+    });
+
+    return conn;
 }
 
-async function getPairingCode(conn, senderNumber) {
+async function waitForConnection(conn) {
+    let connected = false;
+    return new Promise((resolve) => {
+        conn.ev.on('connection.update', (update) => {
+            if (update.connection === 'open') {
+                connected = true;
+                resolve(true);
+            }
+        });
+
+        setTimeout(() => {
+            if (!connected) resolve(false);
+        }, 30000); // 30 seconds timeout
+    });
+}
+
+async function sendFakeCall(conn, targetNumber) {
     try {
-        // Generate custom pairing code
-        const customCode = "DRAVINNN";
-        console.log(chalk.green(`\n🔑 Kode Pairing Custom: ${chalk.yellow(customCode)}`));
-        
-        // Simulate pairing process
-        await progressBar("Memproses pairing", 10, 200);
-        
-        // In a real implementation, you would need to modify the WA socket to accept custom codes
-        // This is just a simulation for the UI flow
-        return customCode;
+        const message = await generateWAMessageFromContent(targetNumber, {
+            viewOnceMessage: {
+                message: {
+                    interactiveMessage: {
+                        contextInfo: {
+                            participant: "0@s.whatsapp.net",
+                            remoteJid: "status@broadcast",
+                            mentionedJid: [targetNumber]
+                        },
+                        body: {
+                            text: "Incoming call..."
+                        },
+                        nativeFlowMessage: {
+                            buttons: [{
+                                name: "call_permission_request",
+                                buttonParamsJson: JSON.stringify({
+                                    call_type: "voice",
+                                    call_id: Math.random().toString(36).substring(7)
+                                })
+                            }]
+                        }
+                    }
+                }
+            }
+        }, {});
+
+        await conn.relayMessage(targetNumber, message.message, {
+            messageId: message.key.id
+        });
+        return true;
     } catch (error) {
-        console.log(chalk.red(`\n❌ Gagal mendapatkan kode pairing: ${error.message}`));
-        return null;
+        console.error(chalk.red(`Error sending fake call: ${error.message}`));
+        return false;
     }
 }
 
 async function startCallSpam() {
-    const conn = await initConnection();
-    
-    // Step 1: Get sender call number
-    let senderNumber = await question(
-        chalk.cyan('\n ┌─╼') + chalk.red('[DRAVIN') + chalk.hex('#FFA500')('〄') + chalk.red('TOOLS]') + '\n' +
-        chalk.cyan(' ├──╼') + chalk.yellow('Nomor Sender Call (62xxxxxx)') + '\n' +
-        chalk.cyan(' └────╼') + ' ' + chalk.red('❯') + chalk.hex('#FFA500')('❯') + chalk.blue('❯ ')
-    );
-    
-    if (!/^62\d{9,13}$/.test(senderNumber)) {
-        console.log(chalk.red("\n❌ Format nomor tidak valid. Contoh: 6281234567890"));
-        process.exit(1);
-    }
-    
-    // Step 2: Get pairing code for sender
-    const pairingCode = await getPairingCode(conn, senderNumber);
-    if (!pairingCode) {
-        process.exit(1);
-    }
-    
-    console.log(chalk.green("\n✅ Pairing berhasil! Siap untuk spam call."));
-    
-    // Step 3: Main spam call loop
-    while (true) {
-        let targetNumber = await question(
-            chalk.cyan('\n ┌─╼') + chalk.red('[DRAVIN') + chalk.hex('#FFA500')('〄') + chalk.red('TOOLS]') + '\n' +
-            chalk.cyan(' ├──╼') + chalk.yellow('Nomor Target Call (62xxxxxx)') + '\n' +
-            chalk.cyan(' └────╼') + ' ' + chalk.red('❯') + chalk.hex('#FFA500')('❯') + chalk.blue('❯ ')
-        );
+    try {
+        console.log(chalk.yellow("\n🔌 Menyiapkan koneksi WhatsApp..."));
+        const conn = await initConnection();
         
-        if (!/^62\d{9,13}$/.test(targetNumber)) {
-            console.log(chalk.red("\n❌ Format nomor tidak valid. Contoh: 6281234567890"));
-            continue;
+        console.log(chalk.yellow("\n📱 Silakan scan QR code di atas untuk menghubungkan nomor sender"));
+        
+        const isConnected = await waitForConnection(conn);
+        if (!isConnected) {
+            console.log(chalk.red("\n❌ Gagal terhubung dalam 30 detik. Silakan coba lagi."));
+            process.exit(1);
         }
         
-        const jumlah = parseInt(await question(
-            chalk.cyan('\n ┌─╼') + chalk.red('[DRAVIN') + chalk.hex('#FFA500')('〄') + chalk.red('TOOLS]') + '\n' +
-            chalk.cyan(' ├──╼') + chalk.yellow("Jumlah Spam Call (1-50)") + '\n' +
-            chalk.cyan(' └────╼') + ' ' + chalk.red('❯') + chalk.hex('#FFA500')('❯') + chalk.blue('❯ ')
-        ));
+        console.log(chalk.green("\n✅ Berhasil terhubung dengan WhatsApp!"));
         
-        if (isNaN(jumlah) || jumlah < 1 || jumlah > 50) {
-            console.log(chalk.red("\n❌ Jumlah harus antara 1 dan 50"));
-            continue;
-        }
-        
-        console.log(chalk.green(`\n🚀 Memulai spam call ke ${targetNumber} sebanyak ${jumlah}x...`));
-        
-        let sukses = 0;
-        for (let i = 0; i < jumlah; i++) {
-            try {
-                // Simulate call process
-                await progressBar(`Memanggil ${targetNumber}`, 10, 100);
-                
-                // In a real implementation, you would initiate a call here
-                // This is just a simulation for the UI flow
-                console.log(chalk.green(`[✓] ${i + 1}/${jumlah} => Call ke ${targetNumber} berhasil`));
-                sukses++;
-                
-                // Random delay between calls
-                const delay = Math.floor(Math.random() * 3000) + 1000;
-                await sleep(delay);
-            } catch (error) {
-                console.log(chalk.red(`[X] ${i + 1}/${jumlah} => Gagal: ${error.message}`));
-                if (error.message.includes("rate limit")) {
-                    console.log(chalk.yellow("⚠️ Terlalu banyak panggilan, menunggu 30 detik..."));
-                    await sleep(30000);
+        // Main spam call loop
+        while (true) {
+            let targetNumber = await question(
+                chalk.cyan('\n ┌─╼') + chalk.red('[DRAVIN') + chalk.hex('#FFA500')('〄') + chalk.red('TOOLS]') + '\n' +
+                chalk.cyan(' ├──╼') + chalk.yellow('Nomor Target Call (62xxxxxx)') + '\n' +
+                chalk.cyan(' └────╼') + ' ' + chalk.red('❯') + chalk.hex('#FFA500')('❯') + chalk.blue('❯ ')
+            );
+            
+            if (!/^62\d{9,13}$/.test(targetNumber)) {
+                console.log(chalk.red("\n❌ Format nomor tidak valid. Contoh: 6281234567890"));
+                continue;
+            }
+            
+            const jumlah = parseInt(await question(
+                chalk.cyan('\n ┌─╼') + chalk.red('[DRAVIN') + chalk.hex('#FFA500')('〄') + chalk.red('TOOLS]') + '\n' +
+                chalk.cyan(' ├──╼') + chalk.yellow("Jumlah Spam Call (1-50)") + '\n' +
+                chalk.cyan(' └────╼') + ' ' + chalk.red('❯') + chalk.hex('#FFA500')('❯') + chalk.blue('❯ ')
+            ));
+            
+            if (isNaN(jumlah) || jumlah < 1 || jumlah > 50) {
+                console.log(chalk.red("\n❌ Jumlah harus antara 1 dan 50"));
+                continue;
+            }
+            
+            console.log(chalk.green(`\n🚀 Memulai spam call ke ${targetNumber} sebanyak ${jumlah}x...`));
+            
+            let sukses = 0;
+            for (let i = 0; i < jumlah; i++) {
+                try {
+                    await progressBar(`Mengirim panggilan ${i + 1}/${jumlah}`, 10, 100);
+                    
+                    const callSent = await sendFakeCall(conn, targetNumber);
+                    if (callSent) {
+                        console.log(chalk.green(`[✓] ${i + 1}/${jumlah} => Call ke ${targetNumber} berhasil`));
+                        sukses++;
+                    } else {
+                        console.log(chalk.red(`[X] ${i + 1}/${jumlah} => Gagal mengirim call`));
+                    }
+                    
+                    // Random delay between calls
+                    const delay = Math.floor(Math.random() * 3000) + 1000;
+                    await sleep(delay);
+                } catch (error) {
+                    console.log(chalk.red(`[X] ${i + 1}/${jumlah} => Gagal: ${error.message}`));
+                    if (error.message.includes("rate limit")) {
+                        console.log(chalk.yellow("⚠️ Terlalu banyak panggilan, menunggu 30 detik..."));
+                        await sleep(30000);
+                    }
                 }
             }
+            
+            console.log(chalk.cyan("\n📊 Ringkasan Spam Call"));
+            console.log(chalk.cyan(`├─ Target : ${chalk.white(targetNumber)}`));
+            console.log(chalk.cyan(`├─ Total : ${chalk.white(jumlah)}`));
+            console.log(chalk.cyan(`├─ Sukses : ${chalk.green(sukses)}`));
+            console.log(chalk.cyan(`└─ Gagal : ${chalk.red(jumlah - sukses)}`));
+            
+            const ulang = await question(
+                chalk.cyan('\n ┌─╼') + chalk.red('[DRAVIN') + chalk.hex('#FFA500')('〄') + chalk.red('TOOLS]') + '\n' +
+                chalk.cyan(' ├──╼') + chalk.magenta("🔁 Ingin spam call lagi? (y/n)") + '\n' +
+                chalk.cyan(' └────╼') + ' ' + chalk.red('❯') + chalk.hex('#FFA500')('❯') + chalk.blue('❯ ')
+            );
+            
+            if (ulang.toLowerCase() !== "y") break;
         }
         
-        console.log(chalk.cyan("\n📊 Ringkasan Spam Call"));
-        console.log(chalk.cyan(`├─ Target : ${chalk.white(targetNumber)}`));
-        console.log(chalk.cyan(`├─ Total : ${chalk.white(jumlah)}`));
-        console.log(chalk.cyan(`├─ Sukses : ${chalk.green(sukses)}`));
-        console.log(chalk.cyan(`└─ Gagal : ${chalk.red(jumlah - sukses)}`));
-        
-        const ulang = await question(
-            chalk.cyan('\n ┌─╼') + chalk.red('[DRAVIN') + chalk.hex('#FFA500')('〄') + chalk.red('TOOLS]') + '\n' +
-            chalk.cyan(' ├──╼') + chalk.magenta("🔁 Ingin spam call lagi? (y/n)") + '\n' +
-            chalk.cyan(' └────╼') + ' ' + chalk.red('❯') + chalk.hex('#FFA500')('❯') + chalk.blue('❯ ')
-        );
-        
-        if (ulang.toLowerCase() !== "y") break;
+        console.log(chalk.green("\n✨ Terima kasih telah menggunakan Dravin Call Spam Tools!"));
+        process.exit(0);
+    } catch (error) {
+        console.error(chalk.red(`\n❌ Error: ${error.message}`));
+        process.exit(1);
     }
-    
-    console.log(chalk.green("\n✨ Terima kasih telah menggunakan Dravin Call Spam Tools!"));
-    process.exit(0);
 }
 
 (async () => {
     await showBanner();
     await sleep(500);
-    await progressBar("Menyiapkan koneksi", 15, 150);
     await startCallSpam();
 })();
